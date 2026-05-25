@@ -12,6 +12,26 @@ app = FastAPI(
     version="0.2.0"
 )
 
+import os
+from dotenv import load_dotenv
+from groq import Groq
+
+# Charger les variables d'environnement
+load_dotenv()
+
+# Client Groq (chargé au démarrage)
+groq_client = None
+groq_api_key = os.getenv("GROQ_API_KEY")
+
+if groq_api_key:
+    groq_client = Groq(api_key=groq_api_key)
+    print("Client Groq initialisé.")
+else:
+    print(
+        "ATTENTION : GROQ_API_KEY non trouvée. "
+        "/explain sera désactivé."
+    )
+
 import joblib
 import numpy as np
 
@@ -234,3 +254,75 @@ app.add_middleware(
 
     allow_headers=["*"],
 )
+
+from pydantic import BaseModel, Field
+
+
+class ExplainInput(BaseModel):
+    diagnostic: str = Field(..., description="Diagnostic prédit par le modèle")
+    probabilite: float = Field(..., description="Probabilité du diagnostic")
+    age: int = Field(...)
+    sexe: str = Field(...)
+    temperature: float = Field(...)
+    region: str = Field(...)
+
+
+class ExplainOutput(BaseModel):
+    explication: str = Field(..., description="Explication en français")
+    modele_llm: str = Field(
+        default="llama-3.1-8b-instant",
+        description="Modèle LLM utilisé",
+    )
+
+SYSTEM_PROMPT = (
+    "Tu es un assistant médical sénégalais. "
+    "Tu reçois un diagnostic et des données patient. "
+    "Explique le résultat en français simple, "
+    "comme un médecin parlerait à son patient. "
+    "Sois rassurant mais recommande toujours "
+    "une consultation médicale. "
+    "Maximum 3 phrases. "
+    "Ne fais JAMAIS de diagnostic toi-même. "
+    "Tu expliques uniquement le diagnostic fourni."
+)
+
+
+@app.post("/explain", response_model=ExplainOutput)
+def explain(data: ExplainInput):
+    """Expliquer un diagnostic en français avec un LLM."""
+
+    if not groq_client:
+        return ExplainOutput(
+            explication=(
+                "Service d'explication indisponible. "
+                "Clé API non configurée."
+            ),
+            modele_llm="aucun",
+        )
+
+    # Construire le user prompt
+    user_prompt = (
+        f"Patient : {data.sexe}, {data.age} ans, "
+        f"région {data.region}\n"
+        f"Température : {data.temperature}°C\n"
+        f"Diagnostic du modèle : {data.diagnostic} "
+        f"(probabilité {data.probabilite:.0%})\n"
+        f"Explique ce résultat au patient."
+    )
+
+    try:
+        response = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=200,
+            temperature=0.3,
+        )
+        explication = response.choices[0].message.content
+
+    except Exception as e:
+        explication = f"Erreur lors de l'appel au LLM : {str(e)}"
+
+    return ExplainOutput(explication=explication)
